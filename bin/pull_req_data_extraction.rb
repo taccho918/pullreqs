@@ -15,6 +15,7 @@ require 'json'
 require 'sequel'
 require 'trollop'
 require 'open-uri'
+require 'fileutils'
 
 require_relative 'java'
 require_relative 'ruby'
@@ -159,10 +160,10 @@ Extract data for pull requests for a given repository
     end
 
  q = <<-QUERY
-    SELECT p.id, p.language 
+    SELECT p.id, p.language
     FROM projects p, users u
     WHERE u.id = p.owner_id
-      AND u.login = ? 
+      AND u.login = ?
       AND p.name = ?
     QUERY
 
@@ -280,19 +281,19 @@ Extract data for pull requests for a given repository
     self.token = ARGV[2]
 
     user_entry = db.from(:users).where(:login => owner).select(:login).first
-    
+
     if user_entry.nil?
       Trollop::die "Cannot find user #{owner}"
     end
 
    q = <<-QUERY
-    SELECT p.id, p.language 
+    SELECT p.id, p.language
     FROM projects p, users u
     WHERE u.id = p.owner_id
-      AND u.login = ? 
+      AND u.login = ?
       AND p.name = ?
     QUERY
-    
+
     repo_entry = db.fetch(q, owner, repo).first
 
    # repo_entry = db.from(:projects, :users).\
@@ -428,8 +429,10 @@ Extract data for pull requests for a given repository
         :branch_commtis           => num_of_commits,
 
         # post-experiment
-         :branch                   => pull_req_entry(pr)['base']['ref'],
-        # :closed_at                => Time.at(pr[:closed_at]).to_i
+        :branch                   => pull_req_entry(pr)['base']['ref'],
+
+        # is_typo
+        :typo                     => is_typo(pr)
     }
   end
 
@@ -761,6 +764,34 @@ Extract data for pull requests for a given repository
       and prh.pull_request_id = ?
     QUERY
     db.fetch(q, pr[:id]).first[:login]
+  end
+
+  # Is the type of PR typo?
+  def is_typo(pr)
+    title = pull_req_entry(pr)['title']
+    pr_body = pull_req_entry(pr)['body']
+    commits_list_in_pr = []
+    commits_list_in_pr = github_pull_request_commits(owner, repo, pr[:github_id])
+
+    # if PR title contains "typo"
+    if title.match(/typo/)
+      puts "title: typo"
+      return 0
+    # if PR body contains "typo"
+    elsif pr_body.match(/typo/)
+      puts "pr body: typo"
+      return 0
+    # if commit message contains "typo"
+    elsif
+      commits_list_in_pr.each do |c|
+        if c['commit']['message'].match(/typo/)
+          puts "commit msg: typo"
+          return 0
+        end
+      end
+    end
+
+    1
   end
 
   # Number of previous pull requests for the pull requester
@@ -1389,7 +1420,7 @@ Extract data for pull requests for a given repository
 
     oldest = Time.at(Time.at(pr[:created_at]).to_i - 3600 * 24 * 30 * months_back)
     pr_against = pull_req_entry(pr)['base']['sha']
- 
+
     # githbu_id 2285等で onbject not found - no match for id のエラー
     walker = Rugged::Walker.new(git)
     walker.sorting(Rugged::SORT_DATE)
@@ -1503,7 +1534,7 @@ Extract data for pull requests for a given repository
         and c.created_at <= ?
         and pr.id = ?
       QUERY
-      
+
       pullreq = pull_req_entry(pr)
 
       commits = db.fetch(q, pullreq['created_at'], pr[:id]).all
@@ -1528,7 +1559,7 @@ Extract data for pull requests for a given repository
       acc << a unless a.nil?
       acc
     }.select{|c|
-      if c['parents'].nil? 
+      if c['parents'].nil?
         c['parents'] != nil
       else
         c['parents'].size <= 1
@@ -1622,15 +1653,20 @@ Extract data for pull requests for a given repository
   end
 
   def github_pull_request(owner, repo, number)
-    retrieve_from_github(owner, repo, :pulls, number)
+    retrieve_from_github(owner, repo, :pulls, number, 1)
+  end
+
+  def github_pull_request_commits(owner, repo, number)
+    retrieve_from_github(owner, repo, :pulls, number, 0)
   end
 
   # Load a commit from Github. Will return an empty hash if the commit does not exist.
   def github_commit(owner, repo, sha)
-    retrieve_from_github(owner, repo, :commits, sha[:sha])
+    retrieve_from_github(owner, repo, :commits, sha[:sha], 1)
   end
 
-  def retrieve_from_github(owner, repo, type, id)
+  # flag: 0 if you're getting commits list in PR, 1 if you're getting only PR
+  def retrieve_from_github(owner, repo, type, id, flag)
     # type is whether :commits or :pulls
     parent_dir = File.join(type.to_s, "#{owner}@#{repo}")
     contents_json = File.join(parent_dir, "#{id}.json")
@@ -1647,12 +1683,16 @@ Extract data for pull requests for a given repository
       return r
     end
 
-    url = "https://api.github.com/repos/#{owner}/#{repo}/#{type}/#{id}"
+    if flag == 1
+      url = "https://api.github.com/repos/#{owner}/#{repo}/#{type}/#{id}"
+    elsif flag == 0
+      url = "https://api.github.com/repos/#{owner}/#{repo}/#{type}/#{id}/commits"
+    end
     log("Requesting #{url} (#{@remaining} remaining)")
 
     contents = nil
     begin
-      r = open(url, 'User-Agent' => 'fujiwara-yu',
+      r = open(url, 'User-Agent' => 'ghtorrent',
                'Authorization' => "token #{@ghtoken}")
       @remaining = r.meta['x-ratelimit-remaining'].to_i
       @reset = r.meta['x-ratelimit-reset'].to_i
@@ -1723,10 +1763,10 @@ Extract data for pull requests for a given repository
     raise Exception.new("Unimplemented")
   end
  q = <<-QUERY
-    SELECT p.id, p.language 
+    SELECT p.id, p.language
     FROM projects p, users u
     WHERE u.id = p.owner_id
-      AND u.login = ? 
+      AND u.login = ?
       AND p.name = ?
     QUERY
   # Return a f: buff -> Boolean, that determines whether a
@@ -1743,4 +1783,3 @@ end
 
 PullReqDataExtraction.run
 #vim: set filetype=ruby expandtab tabstop=2 shiftwidth=2 autoindent smartindent:
-
